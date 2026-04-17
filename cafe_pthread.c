@@ -5,31 +5,31 @@
 #include <unistd.h>
 #include <time.h>
 
-// ================= 시스템 설정 (변경금지) =================
+// ================= SYSTEM CONFIGURATION (DO NOT MODIFY) =================
 
-#define M 3             // 대기 차로 크기
-#define N 5             // 주문서 레일 크기 
-#define K 2             // 바리스타 수
-#define TOTAL_CARS 15   // 시뮬레이션할 총 차량 수
+#define M 3             // waiting lane capacity
+#define N 5             // order rail capacity
+#define K 2             // number of baristas
+#define TOTAL_CARS 15   // total number of cars to simulate
 
-// ================= 동기화 변수 및 공유 자원 =================
+// ================= SYNCHRONIZATION VARIABLES & SHARED RESOURCES =================
 
-// 주문구역 변수들
+// order-taking area variables
 pthread_mutex_t lane_mutex;
-sem_t cars_in_lane;   // 대기 중인 차량 수
-sem_t taker_ready;    // 접수 직원의 주문 받을 준비 완료 신호
-int waiting_cars = 0; // 현재 대기 차로에 있는 차량 수
+sem_t cars_in_lane;   // number of cars waiting in lane
+sem_t taker_ready;    // signal that order taker is ready
+int waiting_cars = 0; // current number of cars in the waiting lane
 
-int lane_queue[M];    // 대기 차로 큐 (필요 시 별도 구현 가능)
+int lane_queue[M];    // waiting lane queue
 int lane_in = 0, lane_out = 0;
 
-// 주방구역 변수들
+// kitchen area variables
 pthread_mutex_t rail_mutex;
-sem_t empty_slots;    // 레일의 빈 공간 수 (초기값 N)
-sem_t filled_slots;   // 레일에 걸린 주문서 수 (초기값 0)
-int rail_count = 0;   // 현재 레일에 걸린 주문서 수
+sem_t empty_slots;    // number of empty slots on rail (initial: N)
+sem_t filled_slots;   // number of orders on rail (initial: 0)
+int rail_count = 0;   // current number of orders on rail
 
-int rail_queue[N];    // 주문서 레일 큐 (필요 시 별도 구현 가능)
+int rail_queue[N];    // order rail queue
 int rail_in = 0, rail_out = 0;
 
 // 현재 시간을 출력하기 위한 헬퍼 함수
@@ -39,103 +39,102 @@ void print_time() {
     printf("[%02d:%02d:%02d] ", t->tm_hour, t->tm_min, t->tm_sec);
 }
 
-// ================= 스레드 함수 =================
+// ================= THREAD FUNCTIONS =================
 
-// 1. 차량 고객 스레드
+// 1. car customer thread
 void* car_thread(void* arg) {
     int car_id = *(int*)arg;
-    // lane_mutex로 보호
+    // protected by lane_mutex
     pthread_mutex_lock(&lane_mutex);
 
-    // (1) mutex 안에서 대기 차로가 full인지 확인 (race condition 방지)
-    if (waiting_cars == M) { // 차로에 가득 찬 경우
+    // (1) check if lane is full inside mutex (prevents race condition)
+    if (waiting_cars == M) {
         pthread_mutex_unlock(&lane_mutex);
         print_time();
-        printf("차량 [%d]: 대기 줄이 너무 길어 그냥 지나갑니다(Drive away).\n", car_id);
-        return NULL;   // 차량이 대기 줄이 꽉 찼을 때 그냥 지나감.
+        printf("Car [%d]: Line too long, driving away.\n", car_id);
+        return NULL;
     }
 
-    // (2) 대기 차로에 차량 ID 저장 후 추가
+    // (2) add car ID to waiting lane queue
     lane_queue[lane_in % M] = car_id;
     lane_in++; waiting_cars++;
     print_time();
-    printf("차량 [%d] 진입 -> 차로에서 대기합니다. (차로 %d/%d)\n", car_id, waiting_cars, M);
+    printf("Car [%d] entered -> waiting in lane. (lane %d/%d)\n", car_id, waiting_cars, M);
     pthread_mutex_unlock(&lane_mutex);
 
-    // (3) 접수 직원에게 차량 도착 신호
+    // (3) signal order taker that a car has arrived
     sem_post(&cars_in_lane);
 
     return NULL;
 }
 
-// 2. 주문 접수 직원 스레드
+// 2. order taker thread
 void* taker_thread(void* arg) {
     while (1) {
-        
-        // (1) 차량이 올 때까지 세마포어로 대기 (쉬기)
+
+        // (1) wait for a car to arrive
         sem_wait(&cars_in_lane);
 
-        // (2) 대기 차로에서 차량 ID 꺼내기 (lane_mutex로 보호)
+        // (2) dequeue car ID from waiting lane (protected by lane_mutex)
         pthread_mutex_lock(&lane_mutex);
         int car_id = lane_queue[lane_out % M];
         lane_out++; waiting_cars--;
         print_time();
-        printf("주문 접수 직원: 차량 [%d] 주문 접수 시작. (차로 %d/%d)\n", car_id, waiting_cars, M);
+        printf("Order taker: taking order from Car [%d]. (lane %d/%d)\n", car_id, waiting_cars, M);
         pthread_mutex_unlock(&lane_mutex);
 
-        // (3) 주문 접수 (랜덤 1-2초)
+        // (3) take order (random 1-2 seconds)
         sleep(rand() % 2 + 1);
 
-        // (4) 레일이 꽉 찼으면 메시지 출력 후 빈 자리가 날 때까지 대기
+        // (4) wait for an empty slot on the rail if full
         sem_wait(&empty_slots);
 
-        // (5) 주문서를 레일에 올리기 (rail_mutex로 보호)
+        // (5) place order slip on rail (protected by rail_mutex)
         pthread_mutex_lock(&rail_mutex);
         rail_queue[rail_in % N] = car_id;
         rail_in++; rail_count++;
         print_time();
-        printf("주문 접수 직원: 차량 [%d] 주문서 레일에 등록. (레일 %d/%d)\n", car_id, rail_count, N);
+        printf("Order taker: Car [%d] order slip placed on rail. (rail %d/%d)\n", car_id, rail_count, N);
         pthread_mutex_unlock(&rail_mutex);
 
-        sem_post(&filled_slots); // 바리스타에게 주문서 있다고 알려줌
+        sem_post(&filled_slots); // notify barista that an order is ready
     }
 }
 
-// 3. 바리스타 스레드
+// 3. barista thread
 void* barista_thread(void* arg) {
     while(1) {
-        // (1) 주문서 레일에 주문이 올라올 때까지 대기
+        // (1) wait until an order slip is on the rail
         sem_wait(&filled_slots);
 
-        // (2) 레일에서 주문서 꺼내기 (rail_mutex로 보호)
+        // (2) pick up order slip from rail (protected by rail_mutex)
         pthread_mutex_lock(&rail_mutex);
-        int car_id = rail_queue[rail_out % N]; // 레일에서 주문서 가져오기
+        int car_id = rail_queue[rail_out % N];
         rail_out++; rail_count--;
 
         print_time();
-        printf("바리스타 %d: 레일에서 차량 %d 주문 픽업 및 제조 시작. (레일 %d/%d)\n", *(int*)arg, car_id, rail_count, N);
-        
-        pthread_mutex_unlock(&rail_mutex);
-        sem_post(&empty_slots); // 레일에 빈 공간이 생겼음을 알림
+        printf("Barista %d: picked up Car %d order, starting preparation. (rail %d/%d)\n", *(int*)arg, car_id, rail_count, N);
 
-        // (2) 음료 제조 (3~5초, 조건: 주문 시간보다 길어야 함)
+        pthread_mutex_unlock(&rail_mutex);
+        sem_post(&empty_slots); // notify that a rail slot is now free
+
+        // (3) prepare drink (3~5 seconds, must be longer than order-taking time)
         usleep((rand() % 2000 + 3000) * 1000);
 
-        // (3) 제조 완료
+        // (4) drink complete
         print_time();
-        printf("바리스타 [%d]: 차량 [%d]의 [아이스 아메리카노] 제조 완료!\n", *(int*)arg, car_id);
-        
+        printf("Barista [%d]: Car [%d]'s [Iced Americano] is ready!\n", *(int*)arg, car_id);
     }
 }
 
-// ================= 메인 함수 (변경 금지) =================
+// ================= MAIN FUNCTION (DO NOT MODIFY) =================
 int main() {
     time_t seed = time(NULL);
     srand(seed);
-    
-    printf("[SEED] 랜덤 검증용 시드값: %lu\n", seed);
 
-    // Mutex 및 세마포어 초기화
+    printf("[SEED] Random seed for verification: %lu\n", seed);
+
+    // initialize mutexes and semaphores
     pthread_mutex_init(&lane_mutex, NULL);
     pthread_mutex_init(&rail_mutex, NULL);
 
@@ -150,33 +149,33 @@ int main() {
     int barista_ids[K];
     int car_ids[TOTAL_CARS];
 
-    // 직원 스레드 생성
+    // create order taker thread
     pthread_create(&taker, NULL, taker_thread, NULL);
-    
-    // 바리스타 스레드 생성
+
+    // create barista threads
     for (int i = 0; i < K; i++) {
         barista_ids[i] = i + 1;
         pthread_create(&baristas[i], NULL, barista_thread, &barista_ids[i]);
     }
 
-    // 차량 고객 무작위 도착 시뮬레이션 (0.5초 ~ 2초 간격으로 차량 진입)
+    // simulate random car arrivals (0.5s ~ 2s intervals)
     for (int i = 0; i < TOTAL_CARS; i++) {
         car_ids[i] = i + 1;
         pthread_create(&cars[i], NULL, car_thread, &car_ids[i]);
         usleep((rand() % 1500 + 500) * 1000);
     }
 
-    // 모든 차량이 진입하고 처리될 때까지 대기
+    // wait until all cars have been processed
     for (int i = 0; i < TOTAL_CARS; i++) {
         pthread_join(cars[i], NULL);
     }
 
-    // 바리스타가 남은 주문을 모두 처리할 때 까지 대기
+    // wait for baristas to finish remaining orders
     sleep(10);
     print_time();
-    printf("오늘의 영업을 종료합니다.\n");
+    printf("Closing for the day.\n");
 
-    // 자원 해제
+    // release resources
     pthread_mutex_destroy(&lane_mutex);
     pthread_mutex_destroy(&rail_mutex);
     sem_destroy(&cars_in_lane);
